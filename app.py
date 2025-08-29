@@ -115,6 +115,20 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
         df.to_excel(writer, index=False, sheet_name="protokolle")
     return output.getvalue()
 
+def _norm(s: Optional[str]) -> str:
+    return (s or "").casefold().strip()
+
+def matches_filters(record: Dict[str, str], uni_filter: str, fach_filter: str) -> bool:
+    """Return True if record matches all non-empty filters."""
+    ok_uni = True
+    ok_fach = True
+    if uni_filter.strip():
+        ok_uni = _norm(uni_filter) in _norm(record.get("ort_uni", ""))
+    if fach_filter.strip():
+        ok_fach = _norm(fach_filter) in _norm(record.get("fach", ""))
+    return ok_uni and ok_fach
+
+
 # --- Streamlit UI -------------------------------------------------------------
 
 st.set_page_config(page_title="Medi-Learn Protokolle Scraper", layout="wide")
@@ -123,13 +137,16 @@ st.title("Medi-Learn Facharztprüfungs-Protokolle Scraper")
 with st.sidebar:
     st.header("Scrape Settings")
     start_id = st.number_input("Start pageId", min_value=0, value=0, step=1)
-    max_pages = st.number_input("Max pages to try", min_value=1, value=500, step=1,
-                                help="Upper bound on how many IDs to attempt from the start.")
-    miss_streak_limit = st.number_input("Stop after N consecutive misses", min_value=1, value=15, step=1,
-                                        help="Scraping stops early if this many IDs in a row are empty/missing.")
+    max_pages = st.number_input("Max pages to try", min_value=1, value=500, step=1)
+    miss_streak_limit = st.number_input("Stop after N consecutive misses", min_value=1, value=15, step=1)
     delay_ms = st.number_input("Delay between requests (ms)", min_value=0, value=300, step=50)
 
-    st.caption("Tip: Reduce the delay for speed; increase it to be gentler on the server.")
+    st.divider()
+    st.header("Filters (optional)")
+    uni_filter = st.text_input("Uni/Ort contains …", placeholder="e.g., Dresden")
+    fach_filter = st.text_input("Fach contains …", placeholder="e.g., Innere Medizin")
+    st.caption("Only records matching all provided filters will be saved/exported.")
+
 
 # session state init
 if "records" not in st.session_state:
@@ -174,10 +191,15 @@ if run:
 
         found, record, code = fetch_page(page_id, session=s)
         if found and record:
-            st.session_state.records.append(record)
-            found_count += 1
-            miss_streak = 0
-            status.info(f"✅ Found pageId={page_id} (HTTP {code})")
+            if matches_filters(record, uni_filter, fach_filter):
+                st.session_state.records.append(record)
+                found_count += 1
+                miss_streak = 0
+                status.info(f"✅ Saved pageId={page_id} (HTTP {code})")
+            else:
+                # Do not save—doesn’t match filters
+                miss_streak = 0  # still a valid page, so reset the miss streak
+                status.info(f"➖ Skipped pageId={page_id} (doesn't match filters)")
         else:
             miss_streak += 1
             status.warning(f"❌ Missing/empty pageId={page_id} (HTTP {code}) | Miss streak: {miss_streak}")
@@ -213,6 +235,12 @@ if run:
                f"(Tried up to pageId {start_id + int(max_pages) - 1})")
 
 # Results + Export
+active_filters = []
+if uni_filter.strip(): active_filters.append(f"Uni/Ort contains: “{uni_filter}”")
+if fach_filter.strip(): active_filters.append(f"Fach contains: “{fach_filter}”")
+if active_filters:
+    st.info("Active filters → " + " | ".join(active_filters))
+
 st.subheader("Results")
 if st.session_state.records:
     df = pd.DataFrame(st.session_state.records)

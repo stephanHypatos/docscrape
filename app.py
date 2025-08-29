@@ -38,27 +38,49 @@ def normalize_label(raw_label: str) -> str:
 
 def extract_fields_from_table(soup: BeautifulSoup) -> Optional[Dict[str, str]]:
     """
-    Find the table with class 'diensttabelle' and pull key/value pairs.
-    Returns a dict of TARGET_LABELS if present; otherwise None if table missing.
+    Parse table.diensttabelle.
+    - Rows with two cells (label, value) are captured normally.
+    - A following row with a single <td colspan="2"> is treated as a continuation
+      of the previous label's value (e.g., the long 'Gespräch' text).
     """
     table = soup.select_one("table.diensttabelle")
     if not table:
         return None
 
-    data = {v: "" for v in TARGET_LABELS.values()}  # initialize with blanks
+    data = {v: "" for v in TARGET_LABELS.values()}
+    current_key = None  # the normalized key in TARGET_LABELS we’re currently appending to
 
-    # The site places pairs in table rows, typically two <td> cells: label + value
+    def clean_text(el) -> str:
+        # preserve line breaks between <br> and block nodes
+        return el.get_text(separator="\n", strip=True)
+
     for row in table.select("tr"):
         cells = row.find_all(["td", "th"])
-        if len(cells) < 2:
+        if not cells:
             continue
-        label = normalize_label(cells[0].get_text(separator=" ", strip=True))
-        value = cells[1].get_text(separator="\n", strip=True)  # keep line breaks
-        if label in TARGET_LABELS:
-            data[TARGET_LABELS[label]] = value
 
-    # If we found at least one target field, accept; else treat as not-found page
-    if any(val.strip() for val in data.values()):
+        # Case 1: label + value in the same row (>=2 cells)
+        if len(cells) >= 2:
+            label = normalize_label(cells[0].get_text(separator=" ", strip=True))
+            if label in TARGET_LABELS:
+                key = TARGET_LABELS[label]
+                value = clean_text(cells[1])
+                data[key] = (data[key] + ("\n" if data[key] and value else "") + value).strip()
+                current_key = key  # remember for possible continuation row
+                continue
+
+        # Case 2: a single full-width cell (e.g., <td colspan="2">) — continuation
+        if len(cells) == 1 and cells[0].name == "td" and cells[0].has_attr("colspan"):
+            cont_text = clean_text(cells[0])
+            # append only if we have a previous labeled field; most often 'gespraech' or 'vorgespraech'
+            if current_key and cont_text:
+                data[current_key] = (data[current_key] + ("\n" if data[current_key] else "") + cont_text).strip()
+            continue
+
+        # If the row doesn’t match either pattern, don’t change current_key.
+
+    # accept only if we captured something meaningful
+    if any(v.strip() for v in data.values()):
         return data
     return None
 
